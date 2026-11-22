@@ -10,10 +10,14 @@ export async function renderSettings(el) {
         <tbody>
           ${(data.items || []).map((s) => `
             <tr>
-              <td>${s.key}</td>
+              <td>${s.key}${s.readonly ? ' <span class="chip pr">只读</span>' : ''}</td>
               <td>${s.label}</td>
-              <td><input data-key="${s.key}" value="${s.value}" /></td>
-              <td><button data-save="${s.key}">保存</button></td>
+              <td>${s.readonly
+                ? `<input value="${s.value}" disabled title="试跑只读口径，请在入舱规则页操作试跑" />`
+                : `<input data-key="${s.key}" value="${s.value}" />`}</td>
+              <td>${s.readonly
+                ? '<span class="muted">试跑只读</span>'
+                : `<button data-save="${s.key}">保存</button>`}</td>
             </tr>`).join('')}
         </tbody>
       </table>

@@ -117,6 +117,31 @@ CREATE TABLE IF NOT EXISTS reconcile_reports (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS trial_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trial_code TEXT NOT NULL UNIQUE,
+  batch_id INTEGER NOT NULL REFERENCES capture_batches(id),
+  rule_code TEXT NOT NULL,
+  rule_fingerprint TEXT NOT NULL,
+  sample_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('试跑中','已敲定','已废弃')),
+  plan_json TEXT NOT NULL DEFAULT '[]',
+  spot_check_json TEXT NOT NULL DEFAULT '{}',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  confirmed_at TEXT
+);
+
+-- 试跑落点（规则指纹 + 样本键）一经写入即拒覆写；废弃后允许重新试跑。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_trial_pin
+  ON trial_runs(rule_fingerprint, sample_key)
+  WHERE status IN ('试跑中','已敲定');
+
+-- 同一策略同一时间只允许一笔进行中的试跑，充当并发写锁。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_trial_active_rule
+  ON trial_runs(rule_code)
+  WHERE status = '试跑中';
+
 CREATE TABLE IF NOT EXISTS lab_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -141,12 +166,16 @@ def ensure_db() -> Path:
 
 
 @contextmanager
-def get_db(db_path: str | Path | None = None):
+def get_db(db_path: str | Path | None = None, immediate: bool = False):
     path = Path(db_path) if db_path else Config.DATABASE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    # BEGIN IMMEDIATE 抢写锁：试跑等整笔落库场景必须串行，避免两笔并发双落互覆。
+    if immediate:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
         conn.commit()

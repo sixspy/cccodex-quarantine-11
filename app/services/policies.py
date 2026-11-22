@@ -75,15 +75,42 @@ def set_enabled(rule_id: int, enabled: bool, db_path: str | None = None) -> dict
 
 def apply_to_batch(batch_id: int, db_path: str | None = None) -> dict:
     """Apply enabled policy rules to pending bad items in a batch."""
-    with get_db(db_path) as conn:
+    # 延迟导入，避免 policies <-> trial 循环依赖。
+    from app.services import trial as trial_svc
+
+    with get_db(db_path, immediate=True) as conn:
         batch = conn.execute(
             "SELECT * FROM capture_batches WHERE id=?", (batch_id,)
         ).fetchone()
         if not batch:
             raise ServiceError("批次不存在", 404)
-        rules = conn.execute(
-            "SELECT * FROM policy_rules WHERE enabled=1 ORDER BY id"
-        ).fetchall()
+        mode = trial_svc.get_setting(conn, "trial_mode", "0")
+        pin = trial_svc.get_setting(conn, "trial_rule_code", "")
+        routed = False
+        if mode == "1":
+            # 试跑须先敲定，否则正式套规则不咬旧规则，避免双轨并行。
+            confirmed = conn.execute(
+                """
+                SELECT id FROM trial_runs
+                WHERE rule_code=? AND status='已敲定' ORDER BY id DESC LIMIT 1
+                """,
+                (pin,),
+            ).fetchone()
+            if not pin or not confirmed:
+                raise ServiceError(
+                    f"试跑开关已打开（钉点规则{pin or '未设'}）但试跑尚未敲定，"
+                    "抓取调度暂不咬正式规则，双轨不并行",
+                    409,
+                )
+            # 敲定后策略页采数改道：只套试跑钉点规则。
+            rules = conn.execute(
+                "SELECT * FROM policy_rules WHERE rule_code=?", (pin,)
+            ).fetchall()
+            routed = True
+        else:
+            rules = conn.execute(
+                "SELECT * FROM policy_rules WHERE enabled=1 ORDER BY id"
+            ).fetchall()
         items = conn.execute(
             """
             SELECT * FROM capture_items
@@ -96,47 +123,55 @@ def apply_to_batch(batch_id: int, db_path: str | None = None) -> dict:
             for r in conn.execute("SELECT id, bin_code FROM quarantine_bins").fetchall()
         }
 
-    entered = 0
-    closed = 0
-    observed = 0
-    for item in items:
-        matched = None
-        for rule in rules:
-            if rule["quality_match"] == item["quality"]:
-                matched = rule
-                break
-        if not matched:
-            continue
-        if matched["action"] == "入舱":
-            bin_code = matched["target_bin_code"] or "BIN-A"
-            bin_id = bins.get(bin_code)
-            if not bin_id:
+        entered = 0
+        closed = 0
+        observed = 0
+        for item in items:
+            matched = None
+            for rule in rules:
+                if rule["quality_match"] == item["quality"]:
+                    matched = rule
+                    break
+            if not matched:
                 continue
-            quarantine_svc.enter_item(
-                item["id"], bin_id, f"规则{matched['rule_code']}自动入舱", db_path
-            )
-            entered += 1
-        elif matched["action"] == "直接关闭":
-            with get_db(db_path) as conn:
+            if matched["action"] == "入舱":
+                bin_code = matched["target_bin_code"] or "BIN-A"
+                bin_id = bins.get(bin_code)
+                if not bin_id:
+                    continue
+                quarantine_svc.enter_item_conn(
+                    conn,
+                    item["id"],
+                    bin_id,
+                    trial_svc.routing_reason(
+                        matched["rule_code"], matched["action"],
+                        prefix="试跑改道" if routed else "规则",
+                    ),
+                )
+                entered += 1
+            elif matched["action"] == "直接关闭":
                 conn.execute(
                     "UPDATE capture_items SET status='已关闭' WHERE id=?",
                     (item["id"],),
                 )
-            closed += 1
-        else:
-            observed += 1
+                closed += 1
+            else:
+                observed += 1
 
-    audit_svc.write_event(
-        "批内套规则",
-        "capture_batch",
-        batch_id,
-        f"入舱{entered}/关闭{closed}/观察{observed}",
-        db_path=db_path,
-    )
+        audit_svc.write_event(
+            "批内套规则",
+            "capture_batch",
+            batch_id,
+            f"入舱{entered}/关闭{closed}/观察{observed}"
+            + (f"·试跑改道{pin}" if routed else ""),
+            conn=conn,
+        )
     return {
         "batch_id": batch_id,
         "entered": entered,
         "closed": closed,
         "observed": observed,
         "rules_used": len(rules),
+        "routed": routed,
+        "trial_rule_code": pin if routed else "",
     }

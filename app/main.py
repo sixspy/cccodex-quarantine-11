@@ -19,6 +19,8 @@ from app.services import review as review_svc
 from app.services import rework as rework_svc
 from app.services import settings as settings_svc
 from app.services import sources as sources_svc
+from app.services import trial as trial_svc
+from app.services import cleaning as cleaning_svc
 from app.services.errors import ServiceError
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -305,6 +307,70 @@ def create_app():
             body = _read_json(request)
             return _json(policies_svc.apply_to_batch(int(body.get("batch_id") or 0)))
 
+        # trial / dry-run
+        def trial_list(request):
+            user = _require(request)
+            return _json(
+                {
+                    "items": trial_svc.list_trials(),
+                    "verify": trial_svc.verify_trials(),
+                }
+            )
+
+        def trial_create(request):
+            user = _require(request)
+            body = _read_json(request)
+            return _json(
+                trial_svc.create_trial(
+                    int(body.get("batch_id") or 0),
+                    body.get("rule_code") or None,
+                    body.get("sample_key", ""),
+                    actor=user,
+                )
+            )
+
+        def trial_confirm(request):
+            user = _require(request)
+            return _json(
+                trial_svc.confirm_trial(int(request.matchdict["id"]), actor=user)
+            )
+
+        def trial_abandon(request):
+            user = _require(request)
+            return _json(
+                trial_svc.abandon_trial(int(request.matchdict["id"]), actor=user)
+            )
+
+        def trial_spot(request):
+            user = _require(request)
+            return _json(
+                trial_svc.run_spot_check(int(request.matchdict["id"]), actor=user)
+            )
+
+        def trial_mode(request):
+            user = _require(request)
+            body = _read_json(request)
+            return _json(
+                trial_svc.set_trial_mode(
+                    bool(body.get("enabled", False)),
+                    body.get("rule_code", ""),
+                    actor=user,
+                )
+            )
+
+        def cleaning_gate(request):
+            _require(request)
+            return _json(cleaning_svc.evaluate_gate_public())
+
+        def cleaning_run(request):
+            user = _require(request)
+            body = _read_json(request)
+            return _json(
+                cleaning_svc.orchestrate(
+                    int(body.get("batch_id") or 0), actor=user
+                )
+            )
+
         def audits_list(request):
             _require(request)
             limit = int(request.params.get("limit") or 100)
@@ -343,6 +409,14 @@ def create_app():
         config.add_route("rule_enable", "/api/rules/{id}/enable")
         config.add_route("rule_apply", "/api/rules/apply")
         config.add_route("audits", "/api/audits")
+        config.add_route("trials", "/api/trials")
+        config.add_route("trial_mode", "/api/trials/mode")
+        config.add_route("trial", "/api/trials/{id}")
+        config.add_route("trial_confirm", "/api/trials/{id}/confirm")
+        config.add_route("trial_abandon", "/api/trials/{id}/abandon")
+        config.add_route("trial_spot", "/api/trials/{id}/spot-check")
+        config.add_route("cleaning_gate", "/api/cleaning/gate")
+        config.add_route("cleaning_run", "/api/cleaning/orchestrate")
 
         config.add_view(root, route_name="root")
         config.add_view(login_page, route_name="login")
@@ -380,5 +454,13 @@ def create_app():
         config.add_view(wrap(rule_enable), route_name="rule_enable", request_method="POST")
         config.add_view(wrap(rule_apply), route_name="rule_apply", request_method="POST")
         config.add_view(wrap(audits_list), route_name="audits", request_method="GET")
+        config.add_view(wrap(trial_list), route_name="trials", request_method="GET")
+        config.add_view(wrap(trial_create), route_name="trials", request_method="POST")
+        config.add_view(wrap(trial_confirm), route_name="trial_confirm", request_method="POST")
+        config.add_view(wrap(trial_abandon), route_name="trial_abandon", request_method="POST")
+        config.add_view(wrap(trial_spot), route_name="trial_spot", request_method="POST")
+        config.add_view(wrap(trial_mode), route_name="trial_mode", request_method="POST")
+        config.add_view(wrap(cleaning_gate), route_name="cleaning_gate", request_method="GET")
+        config.add_view(wrap(cleaning_run), route_name="cleaning_run", request_method="POST")
 
         return config.make_wsgi_app()

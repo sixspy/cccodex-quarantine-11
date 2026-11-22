@@ -4,9 +4,18 @@ export async function renderCaptures(el) {
   const data = await api('/api/batches');
   const bins = await api('/api/bins');
   const openBin = (bins.items || []).find((b) => b.status === '开放');
+  const trialRuleCode = (data.items || []).reduce(
+    (acc, b) => acc || (b.trial_mode ? b.trial_rule_code : ''),
+    '',
+  );
+  const trialBanner = trialRuleCode
+    ? `<div class="hint-box">试跑口径生效中：抓取调度改道试跑规则 <span class="chip pr">${trialRuleCode}</span>，
+        正式规则暂不套用，双轨不并行。</div>`
+    : '';
   el.innerHTML = `
     <div class="card">
-      <h2>抓取批次</h2>
+      <h2>抓取批次 ${trialRuleCode ? `<span class="chip pr">试跑规则 ${trialRuleCode}</span>` : ''}</h2>
+      ${trialBanner}
       <div class="row">
         <input id="src" placeholder="来源名" />
         <input id="note" placeholder="备注" />
@@ -15,7 +24,7 @@ export async function renderCaptures(el) {
     </div>
     <div class="card">
       <table>
-        <thead><tr><th>批号</th><th>来源</th><th>状态</th><th>条目/坏件</th><th>操作</th></tr></thead>
+        <thead><tr><th>批号</th><th>来源</th><th>状态</th><th>条目/坏件</th><th>试跑规则号</th><th>操作</th></tr></thead>
         <tbody>
           ${(data.items || []).map((b) => `
             <tr>
@@ -23,6 +32,7 @@ export async function renderCaptures(el) {
               <td>${b.source_name}</td>
               <td><span class="chip">${b.status}</span></td>
               <td>${b.item_count} / <span class="chip bad">${b.bad_count}</span></td>
+              <td>${b.trial_mode && b.trial_rule_code ? `<span class="chip pr">${b.trial_rule_code}</span>` : '<span class="muted">-</span>'}</td>
               <td class="row">
                 <button data-open="${b.id}">详情</button>
                 <button data-close="${b.id}">关闭</button>

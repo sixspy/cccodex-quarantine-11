@@ -12,23 +12,31 @@ def write_event(
     detail: str = "",
     actor: str = "admin",
     db_path: str | None = None,
+    conn=None,
 ) -> dict:
     action = (action or "").strip()
     entity_type = (entity_type or "").strip()
     if not action or not entity_type:
         raise ServiceError("审计动作不完整")
-    with get_db(db_path) as conn:
-        cur = conn.execute(
+
+    def _insert(c) -> dict:
+        cur = c.execute(
             """
             INSERT INTO audit_events(actor, action, entity_type, entity_id, detail)
             VALUES (?, ?, ?, ?, ?)
             """,
             (actor or "admin", action, entity_type, int(entity_id or 0), detail or ""),
         )
-        row = conn.execute(
+        row = c.execute(
             "SELECT * FROM audit_events WHERE id=?", (cur.lastrowid,)
         ).fetchone()
         return dict(row)
+
+    # 复用调用方连接时，审计与业务同处一笔事务，避免“业务落库、审计丢失”。
+    if conn is not None:
+        return _insert(conn)
+    with get_db(db_path) as own:
+        return _insert(own)
 
 
 def list_events(limit: int = 100, db_path: str | None = None) -> list[dict]:

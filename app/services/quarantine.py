@@ -16,7 +16,22 @@ def list_bins(db_path: str | None = None) -> list[dict]:
             FROM quarantine_bins b ORDER BY b.id
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
+        # 舱卡片挂审计条：最近 3 条与本舱相关的审计事件。
+        for b in out:
+            audits = conn.execute(
+                """
+                SELECT action, detail, created_at FROM audit_events
+                WHERE (entity_type='quarantine_row' AND entity_id IN (
+                        SELECT id FROM quarantine_rows WHERE bin_id=?
+                      ))
+                   OR (entity_type='quarantine_bin' AND entity_id=?)
+                ORDER BY id DESC LIMIT 3
+                """,
+                (b["id"], b["id"]),
+            ).fetchall()
+            b["audit_strip"] = [dict(a) for a in audits]
+        return out
 
 
 def list_rows(bin_id: int | None = None, db_path: str | None = None) -> list[dict]:
@@ -47,67 +62,76 @@ def list_rows(bin_id: int | None = None, db_path: str | None = None) -> list[dic
 
 
 def enter_item(item_id: int, bin_id: int, reason: str, db_path: str | None = None) -> dict:
-    reason = (reason or "").strip() or "质量异常入舱"
     with get_db(db_path) as conn:
-        item = conn.execute("SELECT * FROM capture_items WHERE id=?", (item_id,)).fetchone()
-        if not item:
-            raise ServiceError("条目不存在", 404)
-        if item["status"] not in ("待检",):
-            raise ServiceError("仅待检条目可入舱")
-        if item["quality"] == "合格":
-            raise ServiceError("合格条目不应入舱")
-        bin_row = conn.execute("SELECT * FROM quarantine_bins WHERE id=?", (bin_id,)).fetchone()
-        if not bin_row:
-            raise ServiceError("隔离舱不存在", 404)
-        if bin_row["status"] != "开放":
-            raise ServiceError("隔离舱未开放")
-        open_bins = conn.execute(
-            "SELECT COUNT(*) AS c FROM quarantine_bins WHERE status='开放'"
-        ).fetchone()["c"]
-        max_open = int(settings_svc.get_value("max_bin_open", "3", db_path) or "3")
-        if open_bins > max_open:
-            raise ServiceError("开放隔离舱超过上限")
-        occupied = conn.execute(
-            "SELECT COUNT(*) AS c FROM quarantine_rows WHERE bin_id=? AND status IN ('待复核','回炉中')",
-            (bin_id,),
-        ).fetchone()["c"]
-        if occupied >= bin_row["capacity"]:
-            raise ServiceError("隔离舱已满")
-        exists = conn.execute(
-            "SELECT id FROM quarantine_rows WHERE item_id=?", (item_id,)
-        ).fetchone()
-        if exists:
-            raise ServiceError("条目已在隔离舱")
-        cur = conn.execute(
-            """
-            INSERT INTO quarantine_rows(bin_id, item_id, reason, status)
-            VALUES (?, ?, ?, '待复核')
-            """,
-            (bin_id, item_id, reason),
-        )
-        conn.execute(
-            "UPDATE capture_items SET status='入舱' WHERE id=?", (item_id,)
-        )
-        n = conn.execute("SELECT COUNT(*) AS c FROM review_tickets").fetchone()["c"] + 1
-        conn.execute(
-            """
-            INSERT INTO review_tickets(ticket_code, row_id, decision, comment)
-            VALUES (?, ?, '待决', ?)
-            """,
-            (f"REV-{n:04d}", cur.lastrowid, "入舱自动开复核单"),
-        )
-        row_id = cur.lastrowid
-        row = conn.execute(
-            """
-            SELECT r.*, i.item_key, i.quality, b.bin_code
-            FROM quarantine_rows r
-            JOIN capture_items i ON i.id=r.item_id
-            JOIN quarantine_bins b ON b.id=r.bin_id
-            WHERE r.id=?
-            """,
-            (row_id,),
-        ).fetchone()
-    audit_svc.write_event("入舱", "quarantine_row", row_id, reason, db_path=db_path)
+        return enter_item_conn(conn, item_id, bin_id, reason)
+
+
+def enter_item_conn(conn, item_id: int, bin_id: int, reason: str) -> dict:
+    """在调用方事务内入舱；便于套规则整笔落库、审计同账。"""
+    reason = (reason or "").strip() or "质量异常入舱"
+    item = conn.execute("SELECT * FROM capture_items WHERE id=?", (item_id,)).fetchone()
+    if not item:
+        raise ServiceError("条目不存在", 404)
+    if item["status"] not in ("待检",):
+        raise ServiceError("仅待检条目可入舱")
+    if item["quality"] == "合格":
+        raise ServiceError("合格条目不应入舱")
+    bin_row = conn.execute("SELECT * FROM quarantine_bins WHERE id=?", (bin_id,)).fetchone()
+    if not bin_row:
+        raise ServiceError("隔离舱不存在", 404)
+    if bin_row["status"] != "开放":
+        raise ServiceError("隔离舱未开放")
+    open_bins = conn.execute(
+        "SELECT COUNT(*) AS c FROM quarantine_bins WHERE status='开放'"
+    ).fetchone()["c"]
+    setting = conn.execute(
+        "SELECT value FROM lab_settings WHERE key='max_bin_open'"
+    ).fetchone()
+    max_open = int(setting["value"]) if setting else 3
+    if open_bins > max_open:
+        raise ServiceError("开放隔离舱超过上限")
+    occupied = conn.execute(
+        "SELECT COUNT(*) AS c FROM quarantine_rows WHERE bin_id=? AND status IN ('待复核','回炉中')",
+        (bin_id,),
+    ).fetchone()["c"]
+    if occupied >= bin_row["capacity"]:
+        raise ServiceError("隔离舱已满")
+    exists = conn.execute(
+        "SELECT id FROM quarantine_rows WHERE item_id=?", (item_id,)
+    ).fetchone()
+    if exists:
+        raise ServiceError("条目已在隔离舱")
+    cur = conn.execute(
+        """
+        INSERT INTO quarantine_rows(bin_id, item_id, reason, status)
+        VALUES (?, ?, ?, '待复核')
+        """,
+        (bin_id, item_id, reason),
+    )
+    conn.execute(
+        "UPDATE capture_items SET status='入舱' WHERE id=?", (item_id,)
+    )
+    n = conn.execute("SELECT COUNT(*) AS c FROM review_tickets").fetchone()["c"] + 1
+    conn.execute(
+        """
+        INSERT INTO review_tickets(ticket_code, row_id, decision, comment)
+        VALUES (?, ?, '待决', ?)
+        """,
+        (f"REV-{n:04d}", cur.lastrowid, "入舱自动开复核单"),
+    )
+    row_id = cur.lastrowid
+    row = conn.execute(
+        """
+        SELECT r.*, i.item_key, i.quality, b.bin_code
+        FROM quarantine_rows r
+        JOIN capture_items i ON i.id=r.item_id
+        JOIN quarantine_bins b ON b.id=r.bin_id
+        WHERE r.id=?
+        """,
+        (row_id,),
+    ).fetchone()
+    # 入舱与审计同账写入：手工入舱与套规则入舱都会留痕，供舱卡片审计条展示。
+    audit_svc.write_event("入舱", "quarantine_row", row_id, reason, conn=conn)
     return dict(row)
 
 

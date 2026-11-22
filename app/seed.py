@@ -6,6 +6,15 @@ from app.db import _meta_get, _meta_set, ensure_db, get_db
 def seed_if_needed(db_path: str | None = None) -> None:
     ensure_db()
     with get_db(db_path) as conn:
+        # 试跑口径参数对既有库也要补齐，避免升级后设置页缺项。
+        conn.executemany(
+            "INSERT OR IGNORE INTO lab_settings(key, value, label) VALUES (?,?,?)",
+            [
+                ("trial_mode", "0", "试跑开关（只读·由试跑操作控制）"),
+                ("trial_scope", "抓取调度/隔离舱分流/清洗编排", "试跑口径范围（只读）"),
+                ("trial_rule_code", "", "试跑钉点规则号（只读）"),
+            ],
+        )
         if _meta_get(conn, "seeded") == "1":
             return
         settings = [
@@ -15,6 +24,9 @@ def seed_if_needed(db_path: str | None = None) -> None:
             ("reconcile_label", "隔离对账口径A", "对账口径标签"),
             ("audit_keep_days", "30", "审计保留天数"),
             ("policy_default_bin", "BIN-A", "规则默认入舱号"),
+            ("trial_mode", "0", "试跑开关（只读·由试跑操作控制）"),
+            ("trial_scope", "抓取调度/隔离舱分流/清洗编排", "试跑口径范围（只读）"),
+            ("trial_rule_code", "", "试跑钉点规则号（只读）"),
         ]
         conn.executemany(
             "INSERT OR IGNORE INTO lab_settings(key, value, label) VALUES (?,?,?)",

@@ -7,7 +7,7 @@ export async function renderBins(el) {
     <div class="card">
       <h2>隔离舱</h2>
       <table>
-        <thead><tr><th>舱号</th><th>标题</th><th>状态</th><th>占用/容量</th><th>待复核</th></tr></thead>
+        <thead><tr><th>舱号</th><th>标题</th><th>状态</th><th>占用/容量</th><th>待复核</th><th>最近审计</th></tr></thead>
         <tbody>
           ${(bins.items || []).map((b) => `
             <tr>
@@ -16,6 +16,11 @@ export async function renderBins(el) {
               <td><span class="chip">${b.status}</span></td>
               <td>${b.row_count}/${b.capacity}</td>
               <td>${b.pending_count}</td>
+              <td>${(b.audit_strip || []).length
+                ? `<div class="audit-strip">${(b.audit_strip || []).map((a) => `
+                    <div class="audit-line"><span class="chip">${a.action}</span> ${a.detail || ''}
+                      <span class="muted">${a.created_at}</span></div>`).join('')}</div>`
+                : '<span class="muted">-</span>'}</td>
             </tr>`).join('')}
         </tbody>
       </table>

@@ -5,6 +5,26 @@ from app.services import audit as audit_svc
 from app.services.errors import ServiceError
 
 
+def _trial_state(conn) -> dict:
+    mode = conn.execute(
+        "SELECT value FROM lab_settings WHERE key='trial_mode'"
+    ).fetchone()
+    pin = conn.execute(
+        "SELECT value FROM lab_settings WHERE key='trial_rule_code'"
+    ).fetchone()
+    trial = conn.execute(
+        """
+        SELECT trial_code, rule_code, status FROM trial_runs
+        WHERE status IN ('试跑中','已敲定') ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "trial_mode": (mode["value"] if mode else "0") == "1",
+        "trial_rule_code": pin["value"] if pin else "",
+        "trial_code": trial["trial_code"] if trial else "",
+    }
+
+
 def list_batches(db_path: str | None = None) -> list[dict]:
     with get_db(db_path) as conn:
         rows = conn.execute(
@@ -13,7 +33,11 @@ def list_batches(db_path: str | None = None) -> list[dict]:
             FROM capture_batches ORDER BY id DESC
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        items = [dict(r) for r in rows]
+        # 抓取列表亮试跑规则号，供策略页联验与对账行对齐。
+        for it in items:
+            it.update(_trial_state(conn))
+        return items
 
 
 def get_batch(batch_id: int, db_path: str | None = None) -> dict:
