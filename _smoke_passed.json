@@ -1,0 +1,12 @@
+{
+  "label": "quarantine-11",
+  "port": 7511,
+  "login_url": "http://127.0.0.1:7511/login",
+  "http_status": 200,
+  "checks": [
+    "含登录相关文案",
+    "含密码表单线索"
+  ],
+  "passed": true,
+  "checked_at": "2026-11-22T10:03:24+08:00"
+}
